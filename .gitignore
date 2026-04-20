@@ -1,0 +1,21 @@
+# Environments
+env/
+venv/
+.env
+
+# Python internals
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Data (Protecting your raw data from being uploaded to GitHub)
+data/raw/*.csv
+
+# Windows system files
+Thumbs.db
+desktop.ini
+*.db
