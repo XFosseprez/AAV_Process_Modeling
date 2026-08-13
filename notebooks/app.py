@@ -4,10 +4,16 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
 import duckdb
+import joblib
+from pathlib import Path
+from scipy.integrate import trapezoid
 
 if 'count' not in st.session_state:
     st.session_state.count = 0
-
+if "list_batch" not in st.session_state:
+    st.session_state.list_batch = ("No batch produced yet")
+    list_batch = st.session_state.list_batch
+        
 ## First Page
 st.title("Adeno-Associated Virus production data generation and analysis")
     
@@ -161,7 +167,7 @@ def align_telemetry(group):
 @st.cache_resource
 def get_db_connection():
     return duckdb.connect()
-    
+
 def generate_data(): 
     con = get_db_connection()
     
@@ -174,7 +180,21 @@ def generate_data():
         .apply(align_telemetry, include_groups=False)
         .reset_index()
                  )
+    # Calculate instantaneous rates in the aligned dataframe
+    df_cleaned = df_cleaned.sort_values(['Batch_ID', 'Hour'])
+    df_cleaned['dt'] = df_cleaned.groupby('Batch_ID')['Hour'].diff()
     
+    # Growth Rate (mu): (ΔVCD / VCD) / Δt
+    df_cleaned['Growth_Rate'] = df_cleaned.groupby('Batch_ID')['VCD'].diff() / (df_cleaned['VCD'] * df_cleaned['dt'])
+        
+    # Specific Production Rate (qp): ΔP / (VCD * Δt)
+    df_cleaned['Production_Rate'] = df_cleaned.groupby('Batch_ID')['Product'].diff() / (df_cleaned['VCD'] * df_cleaned['dt'])
+        
+    # Specific Consumption Rate (qg): ΔG / (VCD * Δt)
+    df_cleaned['Consumption_Rate'] = df_cleaned.groupby('Batch_ID')['Glucose'].diff() / (df_cleaned['VCD'] * df_cleaned['dt'])
+    df_cleaned = df_cleaned.drop("dt",axis=1)
+    
+    con.execute("DROP VIEW IF EXISTS temp.telemetry_aligned")
     con.execute("""CREATE TABLE IF NOT EXISTS telemetry_aligned(
             Batch_ID VARCHAR, 
             Hour DOUBLE,
@@ -183,7 +203,10 @@ def generate_data():
             Lactate DOUBLE, 
             Ammonia DOUBLE, 
             Product DOUBLE,
-            pH DOUBLE)
+            pH DOUBLE,
+            Growth_Rate DOUBLE,
+            Production_Rate DOUBLE,
+            Consumption_Rate DOUBLE)
             """)
     
     con.execute("""CREATE TABLE IF NOT EXISTS outcomes(
@@ -200,24 +223,124 @@ def generate_data():
     con.execute("INSERT INTO outcomes BY NAME SELECT * FROM df_outcomes")
 
     query = """
-    SELECT 
-    Hour,
-    Batch_ID, 
-    VCD, 
-    Glucose, 
-    Lactate, 
-    Ammonia, 
-    Product,
-    pH,
+    SELECT *
     FROM telemetry_aligned 
     """
 
     df_batches = con.execute(query).df()
+    
     step_1.write(df_batches.tail())
-    return
+    list_batches = df_batches["Batch_ID"].unique()
+    return list_batches
 
+## First Menu: Data generation
 with st.expander("Step 1: generating AAV culture data") as step_1:
-    st.button(label="Generate data", 
-              key=1, 
-              help="Produces files for three moments of the culture: 75h, 100h and the end of the culture",
-              on_click= generate_data) 
+        if st.button(
+            label="Generate data",
+            key="generate_data_btn",
+            help="Produces files for three moments of the culture: 75h, 100h and the end of the culture"
+        ):
+            st.session_state.list_batch = generate_data()
+    
+        list_batch = st.session_state.list_batch
+
+## Preparing for Random forest classifier
+def preparing_features(df_tel, df_out, checkpoint_hour):
+    df_tel = df_tel.sort_values(by=['Batch_ID', 'Hour']).reset_index(drop=True)
+    processed_features = []
+    process_variables = ['VCD', 'Glucose', 'Lactate', 'Ammonia', 'Product', 'pH', 'Growth_Rate', 'Production_Rate', 'Consumption_Rate']
+    
+    for batch_id, batch_group in df_tel.groupby('Batch_ID'):
+        # Limit data to given checkpoint hour (function argument) and put in chronological order
+        group_to_hour = batch_group[batch_group['Hour'] <= checkpoint_hour].sort_values('Hour')
+            
+        # Creates a dataframe populated with the current batch_id of the loop
+        batch_features = pd.DataFrame({'Batch_ID': [batch_id]})
+
+        # Locate the checkpoint row
+        matched_row = group_to_hour[group_to_hour['Hour'] == checkpoint_hour]
+
+        # Extract the state and find its relative integer position in the group
+        if not matched_row.empty:
+            label = matched_row.index[0]
+            checkpoint_index = group_to_hour.index.get_loc(label)
+
+        # Calculating and/or storing current value, lag1 and 2, rolling average and standard deviation
+        # cumulative sum
+        for col in process_variables:
+            batch_features[f'{col}_current'] = group_to_hour[col].iloc[checkpoint_index]
+            
+            batch_features[f'{col}_lag1'] = group_to_hour[col].iloc[checkpoint_index - 1]
+            batch_features[f'{col}_lag2'] = group_to_hour[col].iloc[checkpoint_index - 2]
+            
+            short_window = group_to_hour[col].iloc[(checkpoint_index - 2):(checkpoint_index + 1)]
+            batch_features[f'{col}_roll_mean3'] = short_window.mean()
+            batch_features[f'{col}_roll_std3'] = short_window.std()
+            
+            if checkpoint_index >= 11:
+                macro_window = group_to_hour.iloc[(checkpoint_index - 11):(checkpoint_index + 1)]
+                hourly_rates = macro_window[col].diff().dropna() / macro_window['Hour'].diff().dropna()
+                batch_features[f'{col}_avg_rate_12h'] = hourly_rates.mean()
+            else:
+                batch_features[f'{col}_avg_rate_12h'] = np.nan
+                
+            y = group_to_hour[col].values
+            x = group_to_hour['Hour'].values
+            if len(x) > 1:
+                batch_features[f'{col}_cum_area'] = trapezoid(y, x)
+            else:
+                batch_features[f'{col}_cum_area'] = 0.0
+                
+        processed_features.append(batch_features)
+              
+    df_features_matrix = pd.concat(processed_features, ignore_index=True)
+    df_modeling_set = pd.merge(df_features_matrix, df_out[['Batch_ID', 'Full_Titer']], on='Batch_ID', how='inner')
+
+    
+    return df_modeling_set
+
+## Second Menu: Predictive classification for Full titer
+with st.expander("Step 2: predictive classification for Full titer") as step_2:
+    selected_batch = st.select_slider(label= "Batch selection", options= list_batch )
+    selected_time = st.select_slider(label= "Timepoint to evaluate Full Titer (h)", options=(75, 100), value= 75, width=100)
+
+@st.cache_data
+def classifying_batch (batch, time):
+    con = get_db_connection()
+    
+    query = """
+    SELECT *
+    FROM telemetry_aligned 
+    WHERE "Batch_ID" = ?
+    """
+    
+    telemetry_random_forest = con.execute(query, [batch]).df()
+    
+    query_2 = """
+    SELECT 
+        o.Batch_ID, 
+        o.Full_Titer, 
+    FROM outcomes o
+    WHERE "Batch_ID" = ?
+    """
+    
+    outcome_random_forest = con.execute(query_2, [batch]).df()
+    
+    df_checkpoint = preparing_features(telemetry_random_forest, outcome_random_forest, time)
+    X = df_checkpoint.drop(columns=["Full_Titer", "Batch_ID"]).copy()
+    
+    if time == 100:
+        classifier_100h_model_path = Path("C:\dev\AAV_Process_Modeling\models") / "Classifier_100h_model.joblib"
+        classifier_100h_model = joblib.load(classifier_100h_model_path)
+        y_hat = classifier_100h_model.predict(X)
+    else:
+        classifier_75h_model_path = Path("C:\dev\AAV_Process_Modeling\models") / "Classifier_100h_model.joblib"
+        classifier_75h_model = joblib.load(classifier_75h_model_path)
+        y_hat = classifier_75h_model.predict(X)
+    return y_hat
+
+if selected_batch == "No batch produced yet":
+    st.write("No batch available to analyse")
+else:
+    full_titer_prediction = np.round(classifying_batch (selected_batch, selected_time), 2)
+    st.write(f"The predicted final full titer based on data at {selected_time} hours is {full_titer_prediction} g/L")
