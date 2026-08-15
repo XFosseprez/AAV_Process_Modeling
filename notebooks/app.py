@@ -7,6 +7,9 @@ import duckdb
 import joblib
 from pathlib import Path
 from scipy.integrate import trapezoid
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+import plotly.graph_objects as go
 
 if 'count' not in st.session_state:
     st.session_state.count = 0
@@ -14,11 +17,8 @@ if "list_batch" not in st.session_state:
     st.session_state.list_batch = ("No batch produced yet")
     list_batch = st.session_state.list_batch
         
-## First Page
 st.title("Adeno-Associated Virus production data generation and analysis")
-    
-st.container()
-         
+        
 def bioprocess_model(y, t, params):
     #dependent variables definition
     X, G, L, A, P = y
@@ -300,10 +300,7 @@ def preparing_features(df_tel, df_out, checkpoint_hour):
     return df_modeling_set
 
 ## Second Menu: Predictive classification for Full titer
-with st.expander("Step 2: predictive classification for Full titer") as step_2:
-    selected_batch = st.select_slider(label= "Batch selection", options= list_batch )
-    selected_time = st.select_slider(label= "Timepoint to evaluate Full Titer (h)", options=(75, 100), value= 75, width=100)
-
+    
 @st.cache_data
 def classifying_batch (batch, time):
     con = get_db_connection()
@@ -339,8 +336,106 @@ def classifying_batch (batch, time):
         y_hat = classifier_75h_model.predict(X)
     return y_hat
 
-if selected_batch == "No batch produced yet":
-    st.write("No batch available to analyse")
-else:
-    full_titer_prediction = np.round(classifying_batch (selected_batch, selected_time), 2)
-    st.write(f"The predicted final full titer based on data at {selected_time} hours is {full_titer_prediction} g/L")
+with st.expander("Step 2: predictive classification for Full titer") as step_2:
+    selected_batch_1 = st.select_slider(label= "Batch selection", key="batch_select_rf", options= list_batch )
+    selected_time = st.select_slider(label= "Timepoint to evaluate Full Titer (h)", options=(75, 100), value= 75, width=100)
+    if selected_batch_1 == "No batch produced yet":
+        st.write("No batch available to analyse")
+    else:
+        full_titer_prediction = np.round(classifying_batch (selected_batch_1, selected_time), 2)
+        st.write(f"The predicted final full titer based on data at {selected_time} hours is {full_titer_prediction} g/L")
+    
+@st.cache_data
+def golden_batch(batch):
+    con = get_db_connection()
+
+    query_3 = """
+    SELECT 
+        o.Batch_ID, 
+        o.Full_Titer, 
+        MAX(t.Ammonia) AS Max_Ammonia,
+        MAX(t.Lactate) AS Max_Lactate,
+        MIN(t.pH) AS Min_pH,
+        AVG(CASE WHEN t.Hour >= 0 THEN t.Growth_Rate END) AS Avg_Growth_Rate,
+        AVG(CASE WHEN t.Hour >= 72 THEN t.Production_Rate END) AS Avg_Prod_Rate,
+        AVG(CASE WHEN t.Hour >= 0 THEN t.Consumption_Rate END) AS Avg_Gluc_Cons
+    FROM outcomes o
+    JOIN telemetry_aligned t ON o.Batch_ID = t.Batch_ID
+    WHERE o.Batch_ID = ?
+    GROUP BY o.Batch_ID, o.Full_Titer
+    """
+    df_pca = con.execute(query_3, [batch]).df()
+    
+    feature_cols = ['Max_Ammonia', 'Max_Lactate', 'Min_pH', 
+                    'Avg_Growth_Rate', 'Avg_Prod_Rate', 'Avg_Gluc_Cons']
+    scaler = StandardScaler()
+    X = scaler.fit_transform(df_pca[feature_cols])
+    golden_batch_model_path = Path("C:\dev\AAV_Process_Modeling\models") / "gold_batch.joblib"
+    golden_batch_model = joblib.load(golden_batch_model_path)
+    principal_components = golden_batch_model.transform(X)
+    df_plot = pd.DataFrame(data=principal_components, columns=['PC1', 'PC2', 'PC3'])
+
+    #code for plotting the new batch within the golden PCA space
+    eigenvalues = (2.06079346, 1.36070661, 1.28002434)
+    t2_threshold = 14.214428434604127
+    radius_x = np.sqrt(t2_threshold * eigenvalues[0])
+    radius_y = np.sqrt(t2_threshold * eigenvalues[1])
+    radius_z = np.sqrt(t2_threshold * eigenvalues[2])
+    
+    # 3. Create the Ellipse Shape
+    phi = np.linspace(0, np.pi, 50)
+    theta = np.linspace(0, 2 * np.pi, 50)
+    phi, theta = np.meshgrid(phi, theta)
+    
+    x_ellipse = radius_x * np.sin(phi) * np.cos(theta)
+    y_ellipse = radius_y * np.sin(phi) * np.sin(theta)
+    z_ellipse = radius_z * np.cos(phi)
+    
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter3d(
+        x=df_plot.loc[:,'PC1'],
+        y=df_plot.loc[:,'PC2'],
+        z=df_plot.loc[:,'PC3'],
+        mode='markers',
+        marker=dict(size=4),
+        name=f'Batch: {batch}'
+        ))
+    
+    fig.add_trace(go.Surface(
+        x=x_ellipse, y=y_ellipse, z=z_ellipse,
+        opacity=0.2,
+        showscale=False,
+        colorscale=[[0, 'gray'], [1, 'gray']],
+        name='95% T2 Ellipsoid'
+    ))
+    
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='PC1',
+            yaxis_title='PC2',
+            zaxis_title='PC3'
+        ),
+        title="3D PCA Score Plot with Hotelling T2 Ellipsoid"
+    )
+    
+    fig.update_layout(
+        width=1200,
+        height=800,
+        scene=dict(
+            xaxis_title='PC1',
+            yaxis_title='PC2',
+            zaxis_title='PC3'
+        ),
+    )
+    fig.show()
+
+
+with st.expander("Step 3: Batch comparison with golden batch profile") as step_3:
+    selected_batch_2 = st.select_slider(label= "Batch selection", key="batch_select_pca", options= list_batch )
+    if selected_batch_2 == "No batch produced yet":
+        st.write("No batch available to analyse")
+    else:
+        golden_batch(selected_batch_2)
+       
