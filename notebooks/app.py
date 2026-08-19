@@ -10,12 +10,14 @@ from scipy.integrate import trapezoid
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
 if 'count' not in st.session_state:
     st.session_state.count = 0
 if "list_batch" not in st.session_state:
     st.session_state.list_batch = ("No batch produced yet")
     list_batch = st.session_state.list_batch
+    
         
 st.title("Adeno-Associated Virus production data generation and analysis")
         
@@ -45,75 +47,74 @@ def bioprocess_model(y, t, params):
         
     return [dXdt, dGdt, dLdt, dAdt, dPdt]
 
-def generate_sabotaged_data(num_batches, n_iteration):
+def generate_sabotaged_data(n_iteration):
     all_telemetry = []
     all_outcomes = []
     t_eval = np.linspace(0, 240, 241) 
     
     #defining batches
-    for i in range(num_batches):
-        batch_id = f"BATCH_{n_iteration:03d}"
-        status = "Golden"
+    batch_id = f"BATCH_{n_iteration:03d}"
+    status = "Golden"
 
-        #default values for parameters and initial value for variables
-        # mu_max, Ks, Ki_A, Ki_L, Y_xg, Y_lg, Y_ag, q_p
-        params = [0.04, 0.5, 15.0, 40.0, 0.4, 0.6, 0.1, 0.0025]        
-        y0 = [0.5, 50.0, 0.0, 0.0, 0.0]
+    #default values for parameters and initial value for variables
+    # mu_max, Ks, Ki_A, Ki_L, Y_xg, Y_lg, Y_ag, q_p
+    params = [0.04, 0.5, 15.0, 40.0, 0.4, 0.6, 0.1, 0.0025]        
+    y0 = [0.5, 50.0, 0.0, 0.0, 0.0]
 
-        #ouptu value between 0.0 and 1.0
-        dice_roll = np.random.random()
+    #ouptup value between 0.0 and 1.0
+    dice_roll = np.random.random()
 
-        # as the dice roll should have equal probability for all results,
-        # there is a 15 % chance to start with lower glucose
-        if dice_roll < 0.15: 
-            status = "OOS_Glucose_Fail"
-            y0[1] = 30.0 
+    # as the dice roll should have equal probability for all results,
+    # there is a 15 % chance to start with lower glucose
+    if dice_roll < 0.15: 
+        status = "OOS_Glucose_Fail"
+        y0[1] = 30.0 
 
-        # 15 % chance to have a toxic drift, 
-        # Yag of 0.4 instead of 0.1 means that for the same amount of biomass
-        # there is 1.8 times more ammonia produced
-        elif dice_roll < 0.30: 
-            status = "OOS_Toxic_Drift"
-            params[5] = 0.18
+    # 15 % chance to have a toxic drift, 
+    # Yag of 0.4 instead of 0.1 means that for the same amount of biomass
+    # there is 1.8 times more ammonia produced
+    elif dice_roll < 0.30: 
+        status = "OOS_Toxic_Drift"
+        params[5] = 0.18
             
-        # 10 % chance of transfection fail,
-        # low transfection is translated by low productivity rate (30 % lower)
-        elif dice_roll < 0.40: 
-            status = "OOS_Transfection_Fail"
-            params[6] = 0.035 
+    # 10 % chance of transfection fail,
+    # low transfection is translated by low productivity rate (30 % lower)
+    elif dice_roll < 0.40: 
+        status = "OOS_Transfection_Fail"
+        params[6] = 0.035 
             
-        #solving equation system    
-        sol = odeint(bioprocess_model, y0, t_eval, args=(params,))
+    #solving equation system    
+    sol = odeint(bioprocess_model, y0, t_eval, args=(params,))
 
-        #creating random normaly distributed noise for all data
-        noise = np.random.normal(0, 0.015, sol.shape)# random noise centered at 0 with 1.5 % standard deviation populated accross the shape of the sol matrix
-        sol_noisy = sol + (sol * noise) #adding the noise fitted to the actual data with the data
+    #creating random normaly distributed noise for all data
+    noise = np.random.normal(0, 0.015, sol.shape)# random noise centered at 0 with 1.5 % standard deviation populated accross the shape of the sol matrix
+    sol_noisy = sol + (sol * noise) #adding the noise fitted to the actual data with the data
         
-        batch_df = pd.DataFrame(sol_noisy, columns=['VCD', 'Glucose', 'Lactate', 'Ammonia', 'Product'])
+    batch_df = pd.DataFrame(sol_noisy, columns=['VCD', 'Glucose', 'Lactate', 'Ammonia', 'Product'])
 
-        base_ph = 7.2
-        ph_drop = 0.05 * batch_df['Lactate']
-        ph_buffer = 0.01 * batch_df['Ammonia']
-        batch_df['pH'] = base_ph - ph_drop + ph_buffer + np.random.normal(0, 0.01, len(t_eval))
+    base_ph = 7.2
+    ph_drop = 0.05 * batch_df['Lactate']
+    ph_buffer = 0.01 * batch_df['Ammonia']
+    batch_df['pH'] = base_ph - ph_drop + ph_buffer + np.random.normal(0, 0.01, len(t_eval))
         
-        batch_df['Hour'] = t_eval
-        batch_df['Batch_ID'] = batch_id
-        all_telemetry.append(batch_df)
+    batch_df['Hour'] = t_eval
+    batch_df['Batch_ID'] = batch_id
+    all_telemetry.append(batch_df)
 
-        base_eff = 0.35
-        if status == "OOS_Toxic_Drift":
-            eff = base_eff * 0.6
-        elif status == "OOS_Transfection_Fail":
-            eff = base_eff * 0.3
-        else:
-            eff = base_eff * np.random.normal(1, 0.05)
+    base_eff = 0.35
+    if status == "OOS_Toxic_Drift":
+        eff = base_eff * 0.6
+    elif status == "OOS_Transfection_Fail":
+        eff = base_eff * 0.3
+    else:
+        eff = base_eff * np.random.normal(1, 0.05)
 
-        total_titer = sol[-1, 4] #fetching the last value for the 5th variable
-        full_titer = total_titer * eff
-        pct_full = eff * 100
+    total_titer = sol[-1, 4] #fetching the last value for the 5th variable
+    full_titer = total_titer * eff
+    pct_full = eff * 100
 
-        all_outcomes.append({
-            'Batch_ID': batch_id,
+    all_outcomes.append({
+        'Batch_ID': batch_id,
             'Total_Titer': total_titer,
             'Full_Titer': full_titer,
             'Percent_Full': pct_full
@@ -171,7 +172,8 @@ def get_db_connection():
 def generate_data(): 
     con = get_db_connection()
     
-    df_telemetry, df_outcomes = generate_sabotaged_data(1,st.session_state.count)
+    df_telemetry, df_outcomes = generate_sabotaged_data(st.session_state.count)
+    st.write(st.session_state.count)
     st.session_state.count += 1
     df_messy = generate_dirty_data(df_telemetry)
     df_cleaned = (
@@ -209,6 +211,7 @@ def generate_data():
             Consumption_Rate DOUBLE)
             """)
     
+    con.execute("DROP VIEW IF EXISTS temp.outcomes")    
     con.execute("""CREATE TABLE IF NOT EXISTS outcomes(
             Batch_ID VARCHAR, 
             Total_Titer DOUBLE, 
@@ -365,22 +368,31 @@ def golden_batch(batch):
     GROUP BY o.Batch_ID, o.Full_Titer
     """
     df_pca = con.execute(query_3, [batch]).df()
-    
+       
     feature_cols = ['Max_Ammonia', 'Max_Lactate', 'Min_pH', 
                     'Avg_Growth_Rate', 'Avg_Prod_Rate', 'Avg_Gluc_Cons']
-    scaler = StandardScaler()
-    X = scaler.fit_transform(df_pca[feature_cols])
-    golden_batch_model_path = Path("C:\dev\AAV_Process_Modeling\models") / "gold_batch.joblib"
-    golden_batch_model = joblib.load(golden_batch_model_path)
-    principal_components = golden_batch_model.transform(X)
-    df_plot = pd.DataFrame(data=principal_components, columns=['PC1', 'PC2', 'PC3'])
 
+    query_4 = """
+    SELECT 
+        *
+    FROM outcomes o
+    WHERE o.Batch_ID = ?
+    """
+    
+    df_test = con.execute(query_4, [batch]).df()
+    st.write(df_test)
+    df_pca = df_pca.dropna(subset=feature_cols)
+    golden_batch_model_path = Path("C:\dev\AAV_Process_Modeling\models") / "gold_batch.joblib"
+    golden_batch_pipe = joblib.load(golden_batch_model_path)
+    principal_components = golden_batch_pipe.transform(df_pca[feature_cols])
+    df_plot = pd.DataFrame(data=principal_components, columns=['PC1', 'PC2', 'PC3'])
+    
     #code for plotting the new batch within the golden PCA space
-    eigenvalues = (2.06079346, 1.36070661, 1.28002434)
+    eigenvalues_threshold = (2.06079346, 1.36070661, 1.28002434)
     t2_threshold = 14.214428434604127
-    radius_x = np.sqrt(t2_threshold * eigenvalues[0])
-    radius_y = np.sqrt(t2_threshold * eigenvalues[1])
-    radius_z = np.sqrt(t2_threshold * eigenvalues[2])
+    radius_x = np.sqrt(t2_threshold * eigenvalues_threshold[0])
+    radius_y = np.sqrt(t2_threshold * eigenvalues_threshold[1])
+    radius_z = np.sqrt(t2_threshold * eigenvalues_threshold[2])
     
     # 3. Create the Ellipse Shape
     phi = np.linspace(0, np.pi, 50)
@@ -429,9 +441,39 @@ def golden_batch(batch):
             zaxis_title='PC3'
         ),
     )
-    fig.show()
+    st.plotly_chart(fig, use_container_width=True, height=500)
 
+    eigenvalues = golden_batch_pipe["pca"].explained_variance_
+    t2_value = np.sum((principal_components**2) / eigenvalues, axis=1)
+    st.write(f"T2 value is {np.round(t2_value,2)} compared to the threshold {np.round(t2_threshold,2)}")
 
+    all_scaled = golden_batch_pipe["scaler"].transform(df_pca[feature_cols])
+    reconstructed = golden_batch_pipe["pca"].inverse_transform(principal_components)
+    residuals = all_scaled - reconstructed
+    spe_value = np.sum(residuals**2, axis=1)
+    spe_threshold = 5.5855878193436315
+    st.write(f"SPE value is {np.round(spe_value,2)} compared to the threshold {np.round(spe_threshold,2)}")
+
+    contributions = np.zeros(len(feature_cols))
+    for i in range(len(feature_cols)):
+        contribution_i = 0
+        for pc_idx in range(golden_batch_pipe["pca"].n_components_):
+            loading = golden_batch_pipe["pca"].components_[pc_idx, i]
+            score = principal_components[0, pc_idx]
+            eigenvalue = golden_batch_pipe["pca"].explained_variance_[pc_idx]
+            contribution_i += score * loading / eigenvalue
+        contributions[i] =  all_scaled[0,i] * contribution_i
+
+    fig_2, ax = plt.subplots()
+    ax.bar(feature_cols, contributions, color='crimson', edgecolor='black', alpha=0.8)
+    ax.axhline(0, color='grey', lw=1)
+    ax.set_title(f'T² Variable Contribution Plot for Batch: {batch}')
+    ax.set_ylabel('Contribution Weight')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    ax.grid(axis='y', linestyle=':', alpha=0.6)
+    fig_2.tight_layout()
+    st.pyplot(fig_2, use_container_width=True)
+                    
 with st.expander("Step 3: Batch comparison with golden batch profile") as step_3:
     selected_batch_2 = st.select_slider(label= "Batch selection", key="batch_select_pca", options= list_batch )
     if selected_batch_2 == "No batch produced yet":
