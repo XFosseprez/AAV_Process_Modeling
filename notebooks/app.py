@@ -12,14 +12,23 @@ from sklearn.decomposition import PCA
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 
+
+@st.cache_resource
+def get_db_connection():
+    return duckdb.connect()
+
 if 'count' not in st.session_state:
     st.session_state.count = 0
+    con = get_db_connection()
+    tables = con.execute("SHOW TABLES").fetchall()
+    for (table_name,) in tables:
+        con.execute(f'DROP TABLE IF EXISTS "{table_name}"')
 if "list_batch" not in st.session_state:
     st.session_state.list_batch = ("No batch produced yet")
     list_batch = st.session_state.list_batch
     
         
-st.title("Adeno-Associated Virus production data generation and analysis")
+st.title("Adeno-Associated Virus production, data generation and analysis")
         
 def bioprocess_model(y, t, params):
     #dependent variables definition
@@ -165,15 +174,10 @@ def align_telemetry(group):
                  .bfill()
                  .loc[clean_grid]) # Finally, keep only the exact hours from your grid
 
-@st.cache_resource
-def get_db_connection():
-    return duckdb.connect()
-
 def generate_data(): 
     con = get_db_connection()
     
     df_telemetry, df_outcomes = generate_sabotaged_data(st.session_state.count)
-    st.write(st.session_state.count)
     st.session_state.count += 1
     df_messy = generate_dirty_data(df_telemetry)
     df_cleaned = (
@@ -231,13 +235,13 @@ def generate_data():
     """
 
     df_batches = con.execute(query).df()
-    
-    step_1.write(df_batches.tail())
+    last_batch_mask = (df_batches.iloc[:,0] == df_batches.iloc[-1,0])
+    step_1.write(df_batches[last_batch_mask].head())
     list_batches = df_batches["Batch_ID"].unique()
     return list_batches
 
 ## First Menu: Data generation
-with st.expander("Step 1: generating AAV culture data") as step_1:
+with st.expander("Step 1: Generating AAV culture data") as step_1:
         if st.button(
             label="Generate data",
             key="generate_data_btn",
@@ -247,6 +251,22 @@ with st.expander("Step 1: generating AAV culture data") as step_1:
     
         list_batch = st.session_state.list_batch
 
+        with st.expander("Further details") as substep_1:
+            st.write("""
+            The generate data button simulates one run of AAV culture.
+            
+            The columns are defined as: 
+            - Hour: it is the elapsted culture time in hours
+            - VCD: Viable cell density (g/L), measure of the biomass
+            - Glucose: concentration of glucose substrate (g/L)
+            - Lactate and ammonia: concentration of byproducts from cell growth (g/L)
+            - Product is the viral capsids titer (g/L)
+            - pH is the pH of the culture medium
+            - Growth, production and consumption rates are the rate of change in biomass, product and glucose respectively 
+            reported by unit of biomass (g/(h*g of biomass))
+            
+            """)
+            
 ## Preparing for Random forest classifier
 def preparing_features(df_tel, df_out, checkpoint_hour):
     df_tel = df_tel.sort_values(by=['Batch_ID', 'Hour']).reset_index(drop=True)
@@ -332,22 +352,40 @@ def classifying_batch (batch, time):
     if time == 100:
         classifier_100h_model_path = Path("C:\dev\AAV_Process_Modeling\models") / "Classifier_100h_model.joblib"
         classifier_100h_model = joblib.load(classifier_100h_model_path)
-        y_hat = classifier_100h_model.predict(X)
+        tree_preds = np.array([tree.predict(X)[0] for tree in classifier_100h_model.estimators_])
+        y_hat = tree_preds.mean()      # same as rf.predict(X_new)
+        std_dev = tree_preds.std()
+        p5, p95 = np.percentile(tree_preds, [5, 95])
     else:
         classifier_75h_model_path = Path("C:\dev\AAV_Process_Modeling\models") / "Classifier_100h_model.joblib"
         classifier_75h_model = joblib.load(classifier_75h_model_path)
-        y_hat = classifier_75h_model.predict(X)
-    return y_hat
+        tree_preds = np.array([tree.predict(X)[0] for tree in classifier_75h_model.estimators_])
+        y_hat = tree_preds.mean()      
+        std_dev = tree_preds.std()
+        p5, p95 = np.percentile(tree_preds, [5, 95])
+    return y_hat, p5, p95
 
-with st.expander("Step 2: predictive classification for Full titer") as step_2:
+with st.expander("Step 2: Predictive classification for Full titer") as step_2:
     selected_batch_1 = st.select_slider(label= "Batch selection", key="batch_select_rf", options= list_batch )
     selected_time = st.select_slider(label= "Timepoint to evaluate Full Titer (h)", options=(75, 100), value= 75, width=100)
     if selected_batch_1 == "No batch produced yet":
         st.write("No batch available to analyse")
     else:
-        full_titer_prediction = np.round(classifying_batch (selected_batch_1, selected_time), 2)
-        st.write(f"The predicted final full titer based on data at {selected_time} hours is {full_titer_prediction} g/L")
-    
+        full_titer_prediction, prediction_p5, prediction_p95 = np.round(classifying_batch (selected_batch_1, selected_time), 2)
+        st.write(f"The predicted average final full titer based on data at {selected_time} hours\
+        is {full_titer_prediction} g/L, ({prediction_p5} - {prediction_p95}) g/L are respectively the 5% and 95 % percentile\
+        of the predictions from the trees of the random forest.")
+        st.write(f"The average final full titer of the reference golden batches is 2.49 +/- 0.05 g/L (reported with 95 % confidence interval).")
+        
+    with st.expander("Further details") as substep_2:
+        st.write("""
+        This step simulates the case where the culture is ongoing. 
+        At a chosen moment (see timepoint slider), the system collects data and use a random forest regression model
+        to ouput a prediction of the final full titer (capsid containing the required DNA).
+
+        The batch selection slider allows to change batches.
+        """)
+  
 @st.cache_data
 def golden_batch(batch):
     con = get_db_connection()
@@ -480,4 +518,13 @@ with st.expander("Step 3: Batch comparison with golden batch profile") as step_3
         st.write("No batch available to analyse")
     else:
         golden_batch(selected_batch_2)
-       
+    
+    with st.expander("Further details") as substep_3:
+        st.write("""
+        This tool enables a post-production analysis:
+        - The interactive graph shows the ellipsoid corresponding to the golden batch space (99% confidence region).
+        - The current selected batch is represented by a blue point, based on the PCA dimension reduction model.
+        - The T2 indicates how far the current batch is from the model center — the typical position of the golden batches used to train the PCA model.
+        - The SPE value indicates if the current batch breaks the model logic: the error observed is greater than what the model is able to explain.
+        - The final plot shows which parameters contribute the most to the T2 result, giving hints on what could be the assignable cause.
+            """)       
