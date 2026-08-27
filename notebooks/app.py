@@ -501,7 +501,7 @@ def golden_batch(batch):
             eigenvalue = golden_batch_pipe["pca"].explained_variance_[pc_idx]
             contribution_i += score * loading / eigenvalue
         contributions[i] =  all_scaled[0,i] * contribution_i
-
+    
     fig_2, ax = plt.subplots()
     ax.bar(feature_cols, contributions, color='crimson', edgecolor='black', alpha=0.8)
     ax.axhline(0, color='grey', lw=1)
@@ -511,7 +511,18 @@ def golden_batch(batch):
     ax.grid(axis='y', linestyle=':', alpha=0.6)
     fig_2.tight_layout()
     st.pyplot(fig_2, use_container_width=True)
-                    
+
+    transposed_squared_residual = (residuals**2).flatten().tolist()
+    fig_3, ax_2 = plt.subplots()
+    ax_2.bar(feature_cols, transposed_squared_residual, color='blue', edgecolor='black', alpha=0.8)
+    ax_2.axhline(0, color='grey', lw=1)
+    ax_2.set_title(f'SPE Variable Contribution Plot for Batch: {batch}')
+    ax_2.set_ylabel('Squared residuals')
+    plt.setp(ax_2.get_xticklabels(), rotation=45, ha='right')
+    ax_2.grid(axis='y', linestyle=':', alpha=0.6)
+    fig_3.tight_layout()
+    st.pyplot(fig_3, use_container_width=True)
+
 with st.expander("Step 3: Batch comparison with golden batch profile") as step_3:
     selected_batch_2 = st.select_slider(label= "Batch selection", key="batch_select_pca", options= list_batch )
     if selected_batch_2 == "No batch produced yet":
@@ -526,5 +537,5 @@ with st.expander("Step 3: Batch comparison with golden batch profile") as step_3
         - The current selected batch is represented by a blue point, based on the PCA dimension reduction model.
         - The T2 indicates how far the current batch is from the model center — the typical position of the golden batches used to train the PCA model.
         - The SPE value indicates if the current batch breaks the model logic: the error observed is greater than what the model is able to explain.
-        - The final plot shows which parameters contribute the most to the T2 result, giving hints on what could be the assignable cause.
+        - The final plots show which parameters contribute the most to the T2 result and SPE result, giving hints on what could be investigated.
             """)       
